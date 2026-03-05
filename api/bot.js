@@ -1,5 +1,6 @@
 let currentQueue = []; // поточна черга
-let messageIdMap = null; // зберігаємо message_id повідомлення з чергою
+let currentTitle = ""; // зберігаємо title для черги
+let messageIdMap = null;
 
 const group1 = [
 "Бабляк","Воробей","Ворожбит","Воронцова","Голубенко","Гончар","Дацко",
@@ -18,11 +19,11 @@ function shuffle(arr) {
   return [...arr].sort(() => Math.random() - 0.5);
 }
 
-// Допоміжна функція для оновлення повідомлення
-async function updateMessage(chatId, title) {
-  let message = title;
+// Оновлюємо повідомлення черги
+async function updateMessage(chatId) {
+  let message = currentTitle + "\n";
   currentQueue.forEach((item,i)=>{
-    message += `${i+1}. ${item.name}${item.done ? " +" : ""}\n`;
+    message += `${i+1}. ${item.name}${item.status ? " " + item.status : ""}\n`;
   });
 
   await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`, {
@@ -44,23 +45,26 @@ export default async function handler(req, res) {
   const text = body.message.text?.trim();
 
   let students = null;
-  let title = "";
+  let subject = ""; // назва предмету з аргументу
 
   // --- Генерація черги ---
   if (text.startsWith("/generate_1")) {
     students = group1;
-    title = "Черга здачі (Підгрупа 1):\n\n";
+    subject = text.replace("/generate_1","").trim();
+    currentTitle = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 1):`;
   } else if (text.startsWith("/generate_2")) {
     students = group2;
-    title = "Черга здачі (Підгрупа 2):\n\n";
+    subject = text.replace("/generate_2","").trim();
+    currentTitle = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 2):`;
   } else if (text.startsWith("/generate")) {
     students = allStudents;
-    title = "Черга здачі (вся група):\n\n";
+    subject = text.replace("/generate","").trim();
+    currentTitle = `Черга здачі${subject ? " з " + subject : ""} (вся група):`;
   }
 
   if (students) {
-    currentQueue = shuffle(students).map(name => ({name, done:false}));
-    let message = title;
+    currentQueue = shuffle(students).map(name => ({name, status:""}));
+    let message = currentTitle + "\n";
     currentQueue.forEach((item,i)=> message += `${i+1}. ${item.name}\n`);
 
     const resp = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
@@ -73,19 +77,17 @@ export default async function handler(req, res) {
     return res.status(200).send("ok");
   }
 
-  // --- Обробка "+" або "-" ---
+  // --- Відповідь на повідомлення черги ---
   const replyId = body.message.reply_to_message?.message_id;
   if(replyId && messageIdMap && replyId === messageIdMap) {
-    // Формат: "Прізвище +" або "Прізвище -"
     const match = text.match(/^(\S+)\s*([+-])$/);
     if(match) {
       const surname = match[1];
       const action = match[2]; // "+" або "-"
       const student = currentQueue.find(s => s.name === surname);
-
       if(student) {
-        student.done = action === "+"; // "+" = true, "-" = false
-        await updateMessage(chatId, "Черга здачі (вся група):\n\n");
+        student.status = action; // ставимо "+" або "-"
+        await updateMessage(chatId);
       }
     }
     return res.status(200).send("ok");
