@@ -56,15 +56,15 @@ export default async function handler(req, res) {
   if (text.startsWith("/generate_1")) {
     students = group1;
     subject = text.replace("/generate_1","").trim();
-    currentTitle = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 1):`;
+    currentTitle = `Черга ${subject ? " з " + subject : ""} (Підгрупа 1):`;
   } else if (text.startsWith("/generate_2")) {
     students = group2;
     subject = text.replace("/generate_2","").trim();
-    currentTitle = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 2):`;
+    currentTitle = `Черга ${subject ? " з " + subject : ""} (Підгрупа 2):`;
   } else if (text.startsWith("/generate")) {
     students = allStudents;
     subject = text.replace("/generate","").trim();
-    currentTitle = `Черга здачі${subject ? " з " + subject : ""} (вся група):`;
+    currentTitle = `Черга ${subject ? " з " + subject : ""} (вся група):`;
   }
 
   if (students) {
