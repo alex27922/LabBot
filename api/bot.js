@@ -3,14 +3,38 @@ let currentTitle = "";
 let messageIdMap = null;
 
 const group1 = [
-  "Бабляк","Воробей","Ворожбит","Воронцова","Голубенко","Гончар","Дацко",
-  "Дубнюк","Дячок","Катеренчук","Кияненко","Кравченко","Скороход","Трегуб"
+  "Бабляк",
+  "Воробей",
+  "Ворожбит",
+  "Воронцова",
+  "Голубенко",
+  "Гончар",
+  "Дацко",
+  "Дубнюк",
+  "Дячок",
+  "Катеренчук",
+  "Кияненко",
+  "Кравченко",
+  "Скороход",
+  "Трегуб",
 ];
 
 const group2 = [
-  "Дворжак","Карпіленко","Носаченко","Павловський","Петрова","Прилипко",
-  "Руколянська","Сидоренко","Скорик","Соколов","Чахлеу","Чернов","Чумак",
-  "Шаповал","Шиба"
+  "Дворжак",
+  "Карпіленко",
+  "Носаченко",
+  "Павловський",
+  "Петрова",
+  "Прилипко",
+  "Руколянська",
+  "Сидоренко",
+  "Скорик",
+  "Соколов",
+  "Чахлеу",
+  "Чернов",
+  "Чумак",
+  "Шаповал",
+  "Шиба",
 ];
 
 const allStudents = [...group1, ...group2];
@@ -34,15 +58,18 @@ async function updateMessage(chatId) {
   });
 
   try {
-    await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageIdMap,
-        text: message
-      })
-    });
+    await fetch(
+      `https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageIdMap,
+          text: message,
+        }),
+      },
+    );
   } catch (e) {
     console.error("Failed to update message:", e);
   }
@@ -76,15 +103,20 @@ export default async function handler(req, res) {
     }
 
     if (students) {
-      currentQueue = shuffle(students).map(name => ({ name, status: "" }));
+      currentQueue = shuffle(students).map((name) => ({ name, status: "" }));
       let message = currentTitle + "\n";
-      currentQueue.forEach((item, i) => message += `${i + 1}. ${item.name}\n`);
+      currentQueue.forEach(
+        (item, i) => (message += `${i + 1}. ${item.name}\n`),
+      );
 
-      const resp = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text: message })
-      });
+      const resp = await fetch(
+        `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: message }),
+        },
+      );
       const data = await resp.json();
       if (data.ok) messageIdMap = data.result.message_id;
 
@@ -96,10 +128,35 @@ export default async function handler(req, res) {
     if (match) {
       const surname = match[1];
       const action = match[2]; // "+" або "-"
-      const student = currentQueue.find(s => s.name === surname);
+      const student = currentQueue.find((s) => s.name === surname);
       if (student) {
         student.status = action; // ставимо "+" або "-"
         await updateMessage(chatId);
+      }
+      return res.status(200).send("ok");
+    }
+
+    if (text.startsWith("/swap")) {
+      const replyId = body.message.reply_to_message?.message_id;
+      if (replyId && messageIdMap && replyId === messageIdMap) {
+        const args = text.replace("/swap", "").trim().split(/\s+/);
+        if (args.length === 2) {
+          const [firstSurname, secondSurname] = args;
+          const firstIndex = currentQueue.findIndex(
+            (s) => s.name === firstSurname,
+          );
+          const secondIndex = currentQueue.findIndex(
+            (s) => s.name === secondSurname,
+          );
+          if (firstIndex !== -1 && secondIndex !== -1) {
+            // міняємо місцями
+            [currentQueue[firstIndex], currentQueue[secondIndex]] = [
+              currentQueue[secondIndex],
+              currentQueue[firstIndex],
+            ];
+            await updateMessage(chatId); // оновлюємо повідомлення
+          }
+        }
       }
       return res.status(200).send("ok");
     }
