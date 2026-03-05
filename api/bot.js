@@ -1,40 +1,14 @@
-let currentQueue = [];
-let currentTitle = "";
-let messageIdMap = null;
+let queues = new Map(); // key = message_id, value = {title, students: [{name, status}]}
 
 const group1 = [
-  "Бабляк",
-  "Воробей",
-  "Ворожбит",
-  "Воронцова",
-  "Голубенко",
-  "Гончар",
-  "Дацко",
-  "Дубнюк",
-  "Дячок",
-  "Катеренчук",
-  "Кияненко",
-  "Кравченко",
-  "Скороход",
-  "Трегуб",
+  "Бабляк","Воробей","Ворожбит","Воронцова","Голубенко","Гончар","Дацко",
+  "Дубнюк","Дячок","Катеренчук","Кияненко","Кравченко","Скороход","Трегуб"
 ];
 
 const group2 = [
-  "Дворжак",
-  "Карпіленко",
-  "Носаченко",
-  "Павловський",
-  "Петрова",
-  "Прилипко",
-  "Руколянська",
-  "Сидоренко",
-  "Скорик",
-  "Соколов",
-  "Чахлеу",
-  "Чернов",
-  "Чумак",
-  "Шаповал",
-  "Шиба",
+  "Дворжак","Карпіленко","Носаченко","Павловський","Петрова","Прилипко",
+  "Руколянська","Сидоренко","Скорик","Соколов","Чахлеу","Чернов","Чумак",
+  "Шаповал","Шиба"
 ];
 
 const allStudents = [...group1, ...group2];
@@ -50,26 +24,25 @@ function shuffle(arr) {
 }
 
 // Оновлюємо повідомлення черги
-async function updateMessage(chatId) {
-  if (!messageIdMap) return;
-  let message = currentTitle + "\n";
-  currentQueue.forEach((item, i) => {
+async function updateQueueMessage(chatId, messageId) {
+  const queue = queues.get(messageId);
+  if (!queue) return;
+
+  let message = queue.title + "\n";
+  queue.students.forEach((item, i) => {
     message += `${i + 1}. ${item.name}${item.status ? " " + item.status : ""}\n`;
   });
 
   try {
-    await fetch(
-      `https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          message_id: messageIdMap,
-          text: message,
-        }),
-      },
-    );
+    await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text: message
+      })
+    });
   } catch (e) {
     console.error("Failed to update message:", e);
   }
@@ -91,79 +64,71 @@ export default async function handler(req, res) {
     if (text.startsWith("/generate_1")) {
       students = group1;
       subject = text.replace("/generate_1", "").trim();
-      currentTitle = `Черга ${subject ? " з " + subject : ""} (Підгрупа 1):`;
+      var title = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 1):`;
     } else if (text.startsWith("/generate_2")) {
       students = group2;
       subject = text.replace("/generate_2", "").trim();
-      currentTitle = `Черга ${subject ? " з " + subject : ""} (Підгрупа 2):`;
+      var title = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 2):`;
     } else if (text.startsWith("/generate")) {
       students = allStudents;
       subject = text.replace("/generate", "").trim();
-      currentTitle = `Черга ${subject ? " з " + subject : ""} (вся група):`;
+      var title = `Черга здачі${subject ? " з " + subject : ""} (вся група):`;
     }
 
     if (students) {
-      currentQueue = shuffle(students).map((name) => ({ name, status: "" }));
-      let message = currentTitle + "\n";
-      currentQueue.forEach(
-        (item, i) => (message += `${i + 1}. ${item.name}\n`),
-      );
+      const shuffled = shuffle(students).map(name => ({ name, status: "" }));
+      let message = title + "\n";
+      shuffled.forEach((item, i) => message += `${i + 1}. ${item.name}\n`);
 
-      const resp = await fetch(
-        `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: message }),
-        },
-      );
+      const resp = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text: message })
+      });
+
       const data = await resp.json();
-      if (data.ok) messageIdMap = data.result.message_id;
-
-      return res.status(200).send("ok");
-    }
-
-    // --- Обробка + / - у будь-якому повідомленні ---
-    const match = text.match(/^(\S+)\s*([+-])$/);
-    if (match) {
-      const surname = match[1];
-      const action = match[2]; // "+" або "-"
-      const student = currentQueue.find((s) => s.name === surname);
-      if (student) {
-        student.status = action; // ставимо "+" або "-"
-        await updateMessage(chatId);
+      if (data.ok) {
+        queues.set(data.result.message_id, { title, students: shuffled });
       }
       return res.status(200).send("ok");
     }
 
-    if (text.startsWith("/swap")) {
-      const replyId = body.message.reply_to_message?.message_id;
-      if (replyId && messageIdMap && replyId === messageIdMap) {
+    // --- Обробка + / - для будь-якої черги ---
+    const replyId = body.message.reply_to_message?.message_id;
+    if (replyId && queues.has(replyId)) {
+      const plusMinus = text.match(/^(\S+)\s*([+-])$/);
+      if (plusMinus) {
+        const [_, surname, action] = plusMinus;
+        const queue = queues.get(replyId);
+        const student = queue.students.find(s => s.name === surname);
+        if (student) {
+          student.status = action; // ставимо "+" або "-"
+          await updateQueueMessage(chatId, replyId);
+        }
+        return res.status(200).send("ok");
+      }
+
+      // --- /swap у reply ---
+      if (text.startsWith("/swap")) {
         const args = text.replace("/swap", "").trim().split(/\s+/);
         if (args.length === 2) {
           const [firstSurname, secondSurname] = args;
-          const firstIndex = currentQueue.findIndex(
-            (s) => s.name === firstSurname,
-          );
-          const secondIndex = currentQueue.findIndex(
-            (s) => s.name === secondSurname,
-          );
+          const queue = queues.get(replyId);
+          const firstIndex = queue.students.findIndex(s => s.name === firstSurname);
+          const secondIndex = queue.students.findIndex(s => s.name === secondSurname);
           if (firstIndex !== -1 && secondIndex !== -1) {
-            // міняємо місцями
-            [currentQueue[firstIndex], currentQueue[secondIndex]] = [
-              currentQueue[secondIndex],
-              currentQueue[firstIndex],
-            ];
-            await updateMessage(chatId); // оновлюємо повідомлення
+            [queue.students[firstIndex], queue.students[secondIndex]] =
+              [queue.students[secondIndex], queue.students[firstIndex]];
+            await updateQueueMessage(chatId, replyId);
           }
         }
+        return res.status(200).send("ok");
       }
-      return res.status(200).send("ok");
     }
 
     return res.status(200).send("ok");
   } catch (e) {
     console.error("Webhook error:", e);
-    return res.status(200).send("ok"); // Telegram не отримає 500
+    return res.status(200).send("ok");
   }
 }
