@@ -1,3 +1,5 @@
+import fetch from 'node-fetch';
+
 let queues = new Map(); // message_id -> {title, students, history, snapshots}
 let users = new Map(); // user_id -> surname
 
@@ -17,6 +19,7 @@ const group1 = [
   "Скороход",
   "Трегуб",
 ];
+
 const group2 = [
   "Дворжак",
   "Карпіленко",
@@ -34,6 +37,7 @@ const group2 = [
   "Шаповал",
   "Шиба",
 ];
+
 const allStudents = [...group1, ...group2];
 
 function shuffle(arr) {
@@ -47,7 +51,7 @@ function shuffle(arr) {
 
 async function updateQueue(chatId, messageId) {
   const queue = queues.get(messageId);
-  if (!queue) return;
+  if (!queue || !queue.students) return;
 
   let text = queue.title + "\n";
   queue.students.forEach((s, i) => {
@@ -56,35 +60,39 @@ async function updateQueue(chatId, messageId) {
 
   if (queue.history.length) {
     text += "\n<blockquote expandable>\n";
-    queue.history.slice(-20).forEach((h) => {
-      text += h + "\n";
-    });
+    queue.history.slice(-20).forEach((h) => (text += h + "\n"));
     text += "</blockquote>";
   }
 
-  await fetch(
-    `https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId,
-        text,
-        parse_mode: "HTML",
-      }),
-    },
-  );
+  try {
+    await fetch(
+      `https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+          parse_mode: "HTML",
+        }),
+      },
+    );
+  } catch (e) {
+    console.error("updateQueue error:", e);
+  }
 }
 
 export default async function handler(req, res) {
   try {
     const body = req.body;
     if (!body?.message) return res.status(200).send("ok");
+
     const chatId = body.message.chat.id;
     const text = body.message.text?.trim();
     const userId = body.message.from?.id;
     const user = body.message.from?.first_name || "user";
+
     if (!text) return res.status(200).send("ok");
 
     // Прив'язка користувача до прізвища
@@ -92,17 +100,21 @@ export default async function handler(req, res) {
       const surname = text.replace("/me", "").trim();
       if (surname) {
         users.set(userId, surname);
-        await fetch(
-          `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id,
-              text: `Тепер ти зареєстрований як ${surname}`,
-            }),
-          },
-        );
+        try {
+          await fetch(
+            `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: chatId,
+                text: `Тепер ти зареєстрований як ${surname}`,
+              }),
+            },
+          );
+        } catch (e) {
+          console.error(e);
+        }
       }
       return res.status(200).send("ok");
     }
@@ -128,18 +140,24 @@ export default async function handler(req, res) {
     if (students) {
       const shuffled = shuffle(students).map((name) => ({ name, status: "" }));
       let message = title + "\n";
-      shuffled.forEach((s, i) => {
-        message += `${i + 1}. ${s.name}\n`;
-      });
-      const resp = await fetch(
-        `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id, text: message }),
-        },
-      );
-      const data = await resp.json();
+      shuffled.forEach((s, i) => (message += `${i + 1}. ${s.name}\n`));
+
+      let data;
+      try {
+        const resp = await fetch(
+          `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: message }),
+          },
+        );
+        data = await resp.json();
+      } catch (e) {
+        console.error(e);
+        return res.status(200).send("ok");
+      }
+
       if (data.ok) {
         queues.set(data.result.message_id, {
           title,
@@ -236,7 +254,8 @@ export default async function handler(req, res) {
       // RESTORE
       if (text.startsWith("/restore")) {
         const reply = body.message.reply_to_message;
-        if (!reply?.text) return res.status(200).send("ok");
+        if (!reply?.text || !reply.message_id)
+          return res.status(200).send("ok");
         const lines = reply.text.split("\n");
         const title = lines[0];
         const students = [];
@@ -260,7 +279,7 @@ export default async function handler(req, res) {
 
     return res.status(200).send("ok");
   } catch (e) {
-    console.error(e);
+    console.error("Handler error:", e);
     return res.status(200).send("ok");
   }
 }
