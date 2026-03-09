@@ -1,4 +1,4 @@
-let queues = new Map(); // message_id -> {title, students}
+let queues = new Map();
 
 const group1 = [
   "Бабляк",
@@ -56,6 +56,16 @@ async function updateQueue(chatId, messageId) {
     text += `${i + 1}. ${s.name}${s.status ? " " + s.status : ""}\n`;
   });
 
+  if (queue.history.length) {
+    text += "\n<blockquote expandable>\n";
+
+    queue.history.slice(-20).forEach((h) => {
+      text += h + "\n";
+    });
+
+    text += "</blockquote>";
+  }
+
   await fetch(
     `https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`,
     {
@@ -65,6 +75,7 @@ async function updateQueue(chatId, messageId) {
         chat_id: chatId,
         message_id: messageId,
         text,
+        parse_mode: "HTML",
       }),
     },
   );
@@ -125,6 +136,8 @@ export default async function handler(req, res) {
         queues.set(data.result.message_id, {
           title,
           students: shuffled,
+          history: [],
+          snapshots: [],
         });
       }
 
@@ -134,7 +147,7 @@ export default async function handler(req, res) {
     const replyId = body.message.reply_to_message?.message_id;
 
     if (replyId) {
-      // RESTORE QUEUE
+      // RESTORE старої черги
       if (text.startsWith("/restore")) {
         const reply = body.message.reply_to_message;
 
@@ -164,6 +177,8 @@ export default async function handler(req, res) {
           queues.set(reply.message_id, {
             title,
             students,
+            history: [],
+            snapshots: [],
           });
         }
 
@@ -172,11 +187,30 @@ export default async function handler(req, res) {
 
       if (queues.has(replyId)) {
         const queue = queues.get(replyId);
+        const user = body.message.from?.first_name || "user";
 
-        // PLUS / MINUS
+        // UNDO
+        if (text.startsWith("/undo")) {
+          const last = queue.snapshots.pop();
+
+          if (last) {
+            queue.students = JSON.parse(JSON.stringify(last.students));
+            queue.history.push(`undo (${user})`);
+
+            await updateQueue(chatId, replyId);
+          }
+
+          return res.status(200).send("ok");
+        }
+
+        // PLUS MINUS
         const pm = text.match(/^(\S+)\s*([+-])$/);
 
         if (pm) {
+          queue.snapshots.push({
+            students: JSON.parse(JSON.stringify(queue.students)),
+          });
+
           const surname = pm[1];
           const action = pm[2];
 
@@ -184,6 +218,8 @@ export default async function handler(req, res) {
 
           if (student) {
             student.status = action;
+
+            queue.history.push(`${surname} ${action} (${user})`);
 
             await updateQueue(chatId, replyId);
           }
@@ -196,6 +232,10 @@ export default async function handler(req, res) {
           const args = text.replace("/swap", "").trim().split(/\s+/);
 
           if (args.length === 2) {
+            queue.snapshots.push({
+              students: JSON.parse(JSON.stringify(queue.students)),
+            });
+
             const a = args[0];
             const b = args[1];
 
@@ -207,6 +247,8 @@ export default async function handler(req, res) {
                 queue.students[i2],
                 queue.students[i1],
               ];
+
+              queue.history.push(`swap ${a} ${b} (${user})`);
 
               await updateQueue(chatId, replyId);
             }
@@ -220,6 +262,10 @@ export default async function handler(req, res) {
           const args = text.replace("/move", "").trim().split(/\s+/);
 
           if (args.length === 2) {
+            queue.snapshots.push({
+              students: JSON.parse(JSON.stringify(queue.students)),
+            });
+
             const surname = args[0];
             let newPos = parseInt(args[1]);
 
@@ -234,6 +280,8 @@ export default async function handler(req, res) {
 
               queue.students.splice(newPos - 1, 0, student);
 
+              queue.history.push(`move ${surname} → ${newPos} (${user})`);
+
               await updateQueue(chatId, replyId);
             }
           }
@@ -245,7 +293,7 @@ export default async function handler(req, res) {
 
     return res.status(200).send("ok");
   } catch (e) {
-    console.error("Webhook error:", e);
+    console.error(e);
 
     return res.status(200).send("ok");
   }
