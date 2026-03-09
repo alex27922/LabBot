@@ -1,5 +1,3 @@
-import fetch from 'node-fetch';
-
 let queues = new Map(); // message_id -> {title, students, history, snapshots}
 let users = new Map(); // user_id -> surname
 
@@ -92,7 +90,6 @@ export default async function handler(req, res) {
     const text = body.message.text?.trim();
     const userId = body.message.from?.id;
     const user = body.message.from?.first_name || "user";
-
     if (!text) return res.status(200).send("ok");
 
     // Прив'язка користувача до прізвища
@@ -250,31 +247,30 @@ export default async function handler(req, res) {
         }
         return res.status(200).send("ok");
       }
+    }
 
-      // RESTORE
-      if (text.startsWith("/restore")) {
-        const reply = body.message.reply_to_message;
-        if (!reply?.text || !reply.message_id)
-          return res.status(200).send("ok");
-        const lines = reply.text.split("\n");
-        const title = lines[0];
-        const students = [];
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          const match = line.match(/^\d+\.\s+(\S+)(?:\s+([+-]))?/);
-          if (match) students.push({ name: match[1], status: match[2] || "" });
-        }
-        if (students.length > 0) {
-          queues.set(reply.message_id, {
-            title,
-            students,
-            history: [],
-            snapshots: [],
-          });
-        }
-        return res.status(200).send("ok");
+    // RESTORE для старих повідомлень
+    if (text.startsWith("/restore")) {
+      const reply = body.message.reply_to_message;
+      if (!reply?.text || !reply.message_id) return res.status(200).send("ok");
+      const lines = reply.text.split("\n");
+      const title = lines[0];
+      const students = [];
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const match = line.match(/^\d+\.\s+(\S+)(?:\s+([+-]))?/);
+        if (match) students.push({ name: match[1], status: match[2] || "" });
       }
+      if (students.length > 0) {
+        queues.set(reply.message_id, {
+          title,
+          students,
+          history: [],
+          snapshots: [],
+        });
+      }
+      return res.status(200).send("ok");
     }
 
     return res.status(200).send("ok");
