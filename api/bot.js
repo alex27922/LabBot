@@ -1,5 +1,14 @@
-let queues = new Map(); // message_id -> {title, students, history, snapshots}
-let users = new Map(); // user_id -> surname
+import { createClient } from '@supabase/supabase-js';
+
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing required environment variables");
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const group1 = [
   "Бабляк",
@@ -40,242 +49,710 @@ const allStudents = [...group1, ...group2];
 
 function shuffle(arr) {
   const result = [...arr];
-  for (let i = result.length - 1; i > 0; i--) {
+  for (let i = result.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
 }
 
-async function updateQueue(chatId, messageId) {
-  const queue = queues.get(messageId);
-  if (!queue || !queue.students) return;
+function parseGenerateCommand(text) {
+  let students = null;
+  let subject = "";
+  let scope = "all";
+  let title = "";
 
-  let text = queue.title + "\n";
-  queue.students.forEach((s, i) => {
-    text += `${i + 1}. ${s.name}${s.status ? " " + s.status : ""}\n`;
-  });
+  if (text.startsWith("/generate_1")) {
+    students = group1;
+    subject = text.replace("/generate_1", "").trim();
+    scope = "group1";
+    title = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 1):`;
+  } else if (text.startsWith("/generate_2")) {
+    students = group2;
+    subject = text.replace("/generate_2", "").trim();
+    scope = "group2";
+    title = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 2):`;
+  } else if (text.startsWith("/generate")) {
+    students = allStudents;
+    subject = text.replace("/generate", "").trim();
+    scope = "all";
+    title = `Черга здачі${subject ? " з " + subject : ""} (вся група):`;
+  }
 
-  if (queue.history.length) {
+  return { students, subject, scope, title };
+}
+
+function renderQueueText(queue, items, history = []) {
+  let text = `${queue.title}\n`;
+
+  for (const item of items) {
+    text += `${item.position}. ${item.surname}${item.status ? " " + item.status : ""}\n`;
+  }
+
+  if (history.length > 0) {
     text += "\n<blockquote expandable>\n";
-    queue.history.slice(-20).forEach((h) => (text += h + "\n"));
+    for (const row of history.slice(-20)) {
+      text += `${escapeHtml(row.action)}\n`;
+    }
     text += "</blockquote>";
   }
 
-  try {
-    await fetch(
-      `https://api.telegram.org/bot${process.env.BOT_TOKEN}/editMessageText`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          message_id: messageId,
-          text,
-          parse_mode: "HTML",
-        }),
-      },
-    );
-  } catch (e) {
-    console.error("updateQueue error:", e);
+  return text;
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+async function tg(method, payload) {
+  const resp = await fetch(
+    `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  const data = await resp.json();
+
+  if (!data.ok) {
+    console.error("TELEGRAM_ERROR", { method, payload, response: data });
+    throw new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
   }
+
+  return data.result;
+}
+
+async function sendTempMessage(chatId, text) {
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text,
+  });
+}
+
+async function getQueueByMessage(chatId, messageId) {
+  const { data, error } = await supabase
+    .from("queues")
+    .select("*")
+    .eq("chat_id", chatId)
+    .eq("message_id", messageId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function getQueueItems(queueId) {
+  const { data, error } = await supabase
+    .from("queue_items")
+    .select("*")
+    .eq("queue_id", queueId)
+    .order("position", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function getQueueHistory(queueId) {
+  const { data, error } = await supabase
+    .from("queue_history")
+    .select("*")
+    .eq("queue_id", queueId)
+    .order("id", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function saveSnapshot(queueId) {
+  const items = await getQueueItems(queueId);
+  const snapshot = items.map(({ surname, position, status }) => ({
+    surname,
+    position,
+    status,
+  }));
+
+  const { error } = await supabase.from("queue_snapshots").insert({
+    queue_id: queueId,
+    items_json: snapshot,
+  });
+
+  if (error) throw error;
+}
+
+async function appendHistory(
+  queueId,
+  actorTgId,
+  actorName,
+  actionType,
+  actionText,
+  payload = {},
+) {
+  const { error } = await supabase.from("queue_history").insert({
+    queue_id: queueId,
+    actor_tg_id: actorTgId ?? null,
+    actor_name: actorName || "",
+    action_type: actionType,
+    action: actionText,
+    payload_json: payload,
+  });
+
+  if (error) throw error;
+}
+
+async function rebuildMessage(chatId, messageId) {
+  const queue = await getQueueByMessage(chatId, messageId);
+  if (!queue) return;
+
+  const items = await getQueueItems(queue.id);
+  const history = await getQueueHistory(queue.id);
+  const text = renderQueueText(queue, items, history);
+
+  await tg("editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+  });
+}
+
+async function createQueue(chatId, title, scope, subject, surnames) {
+  const { data: queueRow, error: queueError } = await supabase
+    .from("queues")
+    .insert({
+      chat_id: chatId,
+      message_id: 0,
+      title,
+      scope,
+      subject,
+    })
+    .select("*")
+    .single();
+
+  if (queueError) throw queueError;
+
+  const items = surnames.map((surname, index) => ({
+    queue_id: queueRow.id,
+    surname,
+    position: index + 1,
+    status: "",
+  }));
+
+  const { error: itemsError } = await supabase
+    .from("queue_items")
+    .insert(items);
+  if (itemsError) throw itemsError;
+
+  const text = renderQueueText(queueRow, items, []);
+  const sent = await tg("sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+  });
+
+  const { error: updateError } = await supabase
+    .from("queues")
+    .update({
+      message_id: sent.message_id,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", queueRow.id);
+
+  if (updateError) throw updateError;
+
+  await appendHistory(queueRow.id, null, "system", "generate", "generate", {
+    scope,
+    subject,
+  });
+
+  return sent.message_id;
+}
+
+async function restoreQueueFromReply(
+  chatId,
+  replyMessageId,
+  replyText,
+  actorId,
+  actorName,
+) {
+  const lines = replyText
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => !x.startsWith("<blockquote"))
+    .filter((x) => !x.startsWith("</blockquote>"));
+
+  if (lines.length < 2) return false;
+
+  const title = lines[0];
+  const parsedItems = [];
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const m = lines[i].match(/^(\d+)\.\s+(\S+)(?:\s+([+-]))?$/);
+    if (!m) continue;
+    parsedItems.push({
+      position: Number(m[1]),
+      surname: m[2],
+      status: m[3] || "",
+    });
+  }
+
+  if (parsedItems.length === 0) return false;
+
+  let queue = await getQueueByMessage(chatId, replyMessageId);
+
+  if (!queue) {
+    const { data, error } = await supabase
+      .from("queues")
+      .insert({
+        chat_id: chatId,
+        message_id: replyMessageId,
+        title,
+        scope: title.includes("Підгрупа 1")
+          ? "group1"
+          : title.includes("Підгрупа 2")
+            ? "group2"
+            : "all",
+        subject: "",
+      })
+      .select("*")
+      .single();
+
+    if (error) throw error;
+    queue = data;
+  } else {
+    const { error } = await supabase
+      .from("queues")
+      .update({
+        title,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", queue.id);
+
+    if (error) throw error;
+
+    const { error: deleteItemsError } = await supabase
+      .from("queue_items")
+      .delete()
+      .eq("queue_id", queue.id);
+
+    if (deleteItemsError) throw deleteItemsError;
+  }
+
+  const { error: insertItemsError } = await supabase.from("queue_items").insert(
+    parsedItems.map((item) => ({
+      queue_id: queue.id,
+      surname: item.surname,
+      position: item.position,
+      status: item.status,
+    })),
+  );
+
+  if (insertItemsError) throw insertItemsError;
+
+  await appendHistory(
+    queue.id,
+    actorId,
+    actorName,
+    "restore",
+    `restore (${actorName})`,
+    {},
+  );
+
+  await rebuildMessage(chatId, replyMessageId);
+  return true;
+}
+
+async function setStatus(
+  chatId,
+  messageId,
+  surname,
+  status,
+  actorId,
+  actorName,
+) {
+  const queue = await getQueueByMessage(chatId, messageId);
+  if (!queue) return false;
+
+  await saveSnapshot(queue.id);
+
+  const items = await getQueueItems(queue.id);
+  const target = items.find((x) => x.surname === surname);
+  if (!target) return false;
+
+  const oldStatus = target.status || "";
+
+  const { error } = await supabase
+    .from("queue_items")
+    .update({ status })
+    .eq("id", target.id);
+
+  if (error) throw error;
+
+  await appendHistory(
+    queue.id,
+    actorId,
+    actorName,
+    "set_status",
+    `${surname}: ${oldStatus || "∅"} → ${status || "∅"} (${actorName})`,
+    { surname, oldStatus, newStatus: status },
+  );
+
+  await rebuildMessage(chatId, messageId);
+  return true;
+}
+
+async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
+  const queue = await getQueueByMessage(chatId, messageId);
+  if (!queue) return { ok: false, reason: "Чергу не знайдено" };
+
+  const items = await getQueueItems(queue.id);
+  const first = items.find((x) => x.surname === a);
+  const second = items.find((x) => x.surname === b);
+
+  if (!first || !second) {
+    return { ok: false, reason: "Не знайдено одне або два прізвища" };
+  }
+
+  if (first.status !== "+" || second.status !== "+") {
+    return { ok: false, reason: "Swap дозволений тільки якщо в обох стоїть +" };
+  }
+
+  await saveSnapshot(queue.id);
+
+  const { error: e1 } = await supabase
+    .from("queue_items")
+    .update({ position: -1 })
+    .eq("id", first.id);
+  if (e1) throw e1;
+
+  const { error: e2 } = await supabase
+    .from("queue_items")
+    .update({ position: first.position })
+    .eq("id", second.id);
+  if (e2) throw e2;
+
+  const { error: e3 } = await supabase
+    .from("queue_items")
+    .update({ position: second.position })
+    .eq("id", first.id);
+  if (e3) throw e3;
+
+  await appendHistory(
+    queue.id,
+    actorId,
+    actorName,
+    "swap",
+    `swap ${a}(${first.position}) ↔ ${b}(${second.position}) (${actorName})`,
+    { a, b },
+  );
+
+  await rebuildMessage(chatId, messageId);
+  return { ok: true };
+}
+
+async function moveStudent(
+  chatId,
+  messageId,
+  surname,
+  newPos,
+  actorId,
+  actorName,
+) {
+  const queue = await getQueueByMessage(chatId, messageId);
+  if (!queue) return false;
+
+  const items = await getQueueItems(queue.id);
+  const target = items.find((x) => x.surname === surname);
+  if (!target) return false;
+
+  await saveSnapshot(queue.id);
+
+  const oldPos = target.position;
+  const maxPos = items.length;
+  const finalPos = Math.max(1, Math.min(Number(newPos), maxPos));
+
+  if (oldPos === finalPos) return true;
+
+  const reordered = items
+    .filter((x) => x.id !== target.id)
+    .sort((x, y) => x.position - y.position);
+
+  reordered.splice(finalPos - 1, 0, target);
+
+  for (let i = 0; i < reordered.length; i += 1) {
+    const item = reordered[i];
+    const { error } = await supabase
+      .from("queue_items")
+      .update({ position: i + 1 })
+      .eq("id", item.id);
+
+    if (error) throw error;
+  }
+
+  await appendHistory(
+    queue.id,
+    actorId,
+    actorName,
+    "move",
+    `move ${surname}: ${oldPos} → ${finalPos} (${actorName})`,
+    { surname, oldPos, newPos: finalPos },
+  );
+
+  await rebuildMessage(chatId, messageId);
+  return true;
+}
+
+async function undoLast(chatId, messageId, actorId, actorName) {
+  const queue = await getQueueByMessage(chatId, messageId);
+  if (!queue) return false;
+
+  const { data: snapshot, error } = await supabase
+    .from("queue_snapshots")
+    .select("*")
+    .eq("queue_id", queue.id)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!snapshot) return false;
+
+  const { error: deleteItemsError } = await supabase
+    .from("queue_items")
+    .delete()
+    .eq("queue_id", queue.id);
+
+  if (deleteItemsError) throw deleteItemsError;
+
+  const restoredItems = snapshot.items_json.map((x) => ({
+    queue_id: queue.id,
+    surname: x.surname,
+    position: x.position,
+    status: x.status || "",
+  }));
+
+  const { error: insertError } = await supabase
+    .from("queue_items")
+    .insert(restoredItems);
+
+  if (insertError) throw insertError;
+
+  const { error: deleteSnapshotError } = await supabase
+    .from("queue_snapshots")
+    .delete()
+    .eq("id", snapshot.id);
+
+  if (deleteSnapshotError) throw deleteSnapshotError;
+
+  await appendHistory(
+    queue.id,
+    actorId,
+    actorName,
+    "undo",
+    `undo (${actorName})`,
+    {},
+  );
+  await rebuildMessage(chatId, messageId);
+  return true;
+}
+
+async function markUpdateProcessed(updateId) {
+  const { error } = await supabase
+    .from("processed_updates")
+    .insert({ update_id: updateId });
+  if (error) throw error;
+}
+
+async function isUpdateProcessed(updateId) {
+  const { data, error } = await supabase
+    .from("processed_updates")
+    .select("update_id")
+    .eq("update_id", updateId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return !!data;
 }
 
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(200).send("ok");
+  }
+
   try {
     const body = req.body;
-    if (!body?.message) return res.status(200).send("ok");
+    const updateId = body?.update_id;
 
-    const chatId = body.message.chat.id;
-    const text = body.message.text?.trim();
-    const userId = body.message.from?.id;
-    const user = body.message.from?.first_name || "user";
-    if (!text) return res.status(200).send("ok");
+    if (typeof updateId === "number") {
+      const alreadyProcessed = await isUpdateProcessed(updateId);
+      if (alreadyProcessed) {
+        return res.status(200).send("ok");
+      }
+      await markUpdateProcessed(updateId);
+    }
 
-    // Прив'язка користувача до прізвища
+    const msg = body?.message;
+    if (!msg) {
+      return res.status(200).send("ok");
+    }
+
+    const chatId = msg.chat?.id;
+    const text = msg.text?.trim();
+    const actorId = msg.from?.id ?? null;
+    const actorName = msg.from?.first_name || "user";
+
+    if (!chatId || !text) {
+      return res.status(200).send("ok");
+    }
+
+    if (text === "/ping") {
+      await sendTempMessage(chatId, "pong");
+      return res.status(200).send("ok");
+    }
+
     if (text.startsWith("/me")) {
       const surname = text.replace("/me", "").trim();
       if (surname) {
-        users.set(userId, surname);
-        try {
-          await fetch(
-            `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: chatId,
-                text: `Тепер ти зареєстрований як ${surname}`,
-              }),
-            },
-          );
-        } catch (e) {
-          console.error(e);
-        }
+        const { error } = await supabase.from("user_bindings").upsert({
+          tg_user_id: actorId,
+          surname,
+        });
+
+        if (error) throw error;
+        await sendTempMessage(chatId, `Тепер ти зареєстрований як ${surname}`);
       }
       return res.status(200).send("ok");
     }
 
-    // Генерація черги
-    let students = null,
-      subject = "",
-      title = "";
-    if (text.startsWith("/generate_1")) {
-      students = group1;
-      subject = text.replace("/generate_1", "").trim();
-      title = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 1):`;
-    } else if (text.startsWith("/generate_2")) {
-      students = group2;
-      subject = text.replace("/generate_2", "").trim();
-      title = `Черга здачі${subject ? " з " + subject : ""} (Підгрупа 2):`;
-    } else if (text.startsWith("/generate")) {
-      students = allStudents;
-      subject = text.replace("/generate", "").trim();
-      title = `Черга здачі${subject ? " з " + subject : ""} (вся група):`;
-    }
-
-    if (students) {
-      const shuffled = shuffle(students).map((name) => ({ name, status: "" }));
-      let message = title + "\n";
-      shuffled.forEach((s, i) => (message += `${i + 1}. ${s.name}\n`));
-
-      let data;
-      try {
-        const resp = await fetch(
-          `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: chatId, text: message }),
-          },
-        );
-        data = await resp.json();
-      } catch (e) {
-        console.error(e);
-        return res.status(200).send("ok");
-      }
-
-      if (data.ok) {
-        queues.set(data.result.message_id, {
-          title,
-          students: shuffled,
-          history: [],
-          snapshots: [],
-        });
-      }
+    const generate = parseGenerateCommand(text);
+    if (generate.students) {
+      const shuffled = shuffle(generate.students);
+      await createQueue(
+        chatId,
+        generate.title,
+        generate.scope,
+        generate.subject,
+        shuffled,
+      );
       return res.status(200).send("ok");
     }
 
-    const replyId = body.message.reply_to_message?.message_id;
-    if (replyId && queues.has(replyId)) {
-      const queue = queues.get(replyId);
+    const replyMessageId = msg.reply_to_message?.message_id;
+    const replyText = msg.reply_to_message?.text;
 
-      // UNDO
-      if (text.startsWith("/undo")) {
-        const last = queue.snapshots.pop();
-        if (last) {
-          queue.students = JSON.parse(JSON.stringify(last.students));
-          queue.history.push(`undo (${user})`);
-          await updateQueue(chatId, replyId);
-        }
-        return res.status(200).send("ok");
-      }
-
-      // PLUS / MINUS
-      const pm = text.match(/^(\S+)\s*([+-])$/);
-      if (pm) {
-        queue.snapshots.push({
-          students: JSON.parse(JSON.stringify(queue.students)),
-        });
-        const surname = pm[1],
-          action = pm[2];
-        const student = queue.students.find((s) => s.name === surname);
-        if (student) {
-          const oldStatus = student.status || "-";
-          student.status = action;
-          queue.history.push(`${surname}: ${oldStatus} → ${action} (${user})`);
-          await updateQueue(chatId, replyId);
-        }
-        return res.status(200).send("ok");
-      }
-
-      // SWAP
-      if (text.startsWith("/swap")) {
-        const args = text.replace("/swap", "").trim().split(/\s+/);
-        if (args.length === 2) {
-          queue.snapshots.push({
-            students: JSON.parse(JSON.stringify(queue.students)),
-          });
-          const a = args[0],
-            b = args[1];
-          const i1 = queue.students.findIndex((s) => s.name === a);
-          const i2 = queue.students.findIndex((s) => s.name === b);
-          if (i1 !== -1 && i2 !== -1) {
-            [queue.students[i1], queue.students[i2]] = [
-              queue.students[i2],
-              queue.students[i1],
-            ];
-            queue.history.push(
-              `swap ${a}(${i1 + 1}) ↔ ${b}(${i2 + 1}) (${user})`,
-            );
-            await updateQueue(chatId, replyId);
-          }
-        }
-        return res.status(200).send("ok");
-      }
-
-      // MOVE
-      if (text.startsWith("/move")) {
-        const args = text.replace("/move", "").trim().split(/\s+/);
-        if (args.length === 2) {
-          queue.snapshots.push({
-            students: JSON.parse(JSON.stringify(queue.students)),
-          });
-          const surname = args[0];
-          let newPos = parseInt(args[1]);
-          const index = queue.students.findIndex((s) => s.name === surname);
-          if (index !== -1) {
-            const student = queue.students.splice(index, 1)[0];
-            const oldPos = index + 1;
-            if (newPos < 1) newPos = 1;
-            if (newPos > queue.students.length + 1)
-              newPos = queue.students.length + 1;
-            queue.students.splice(newPos - 1, 0, student);
-            queue.history.push(`${surname}: ${oldPos} → ${newPos} (${user})`);
-            await updateQueue(chatId, replyId);
-          }
-        }
-        return res.status(200).send("ok");
-      }
-    }
-
-    // RESTORE для старих повідомлень
     if (text.startsWith("/restore")) {
-      const reply = body.message.reply_to_message;
-      if (!reply?.text || !reply.message_id) return res.status(200).send("ok");
-      const lines = reply.text.split("\n");
-      const title = lines[0];
-      const students = [];
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const match = line.match(/^\d+\.\s+(\S+)(?:\s+([+-]))?/);
-        if (match) students.push({ name: match[1], status: match[2] || "" });
+      if (!replyMessageId || !replyText) {
+        await sendTempMessage(chatId, "Reply на повідомлення з чергою");
+        return res.status(200).send("ok");
       }
-      if (students.length > 0) {
-        queues.set(reply.message_id, {
-          title,
-          students,
-          history: [],
-          snapshots: [],
-        });
+
+      const restored = await restoreQueueFromReply(
+        chatId,
+        replyMessageId,
+        replyText,
+        actorId,
+        actorName,
+      );
+
+      if (!restored) {
+        await sendTempMessage(chatId, "Не вдалося відновити чергу");
+      }
+      return res.status(200).send("ok");
+    }
+
+    if (text.startsWith("/sync")) {
+      if (!replyMessageId) {
+        await sendTempMessage(chatId, "Reply на повідомлення черги");
+        return res.status(200).send("ok");
+      }
+
+      const queue = await getQueueByMessage(chatId, replyMessageId);
+      if (!queue) {
+        await sendTempMessage(chatId, "Чергу не знайдено в БД");
+        return res.status(200).send("ok");
+      }
+
+      await rebuildMessage(chatId, replyMessageId);
+      return res.status(200).send("ok");
+    }
+
+    if (!replyMessageId) {
+      return res.status(200).send("ok");
+    }
+
+    const pm = text.match(/^(\S+)\s*([+-])$/);
+    if (pm) {
+      const ok = await setStatus(
+        chatId,
+        replyMessageId,
+        pm[1],
+        pm[2],
+        actorId,
+        actorName,
+      );
+      if (!ok) {
+        await sendTempMessage(chatId, "Не вдалося змінити статус");
+      }
+      return res.status(200).send("ok");
+    }
+
+    if (text.startsWith("/swap")) {
+      const args = text.replace("/swap", "").trim().split(/\s+/);
+      if (args.length === 2) {
+        const result = await swapStudents(
+          chatId,
+          replyMessageId,
+          args[0],
+          args[1],
+          actorId,
+          actorName,
+        );
+
+        if (!result.ok) {
+          await sendTempMessage(chatId, result.reason);
+        }
+      } else {
+        await sendTempMessage(chatId, "Формат: /swap Прізвище1 Прізвище2");
+      }
+      return res.status(200).send("ok");
+    }
+
+    if (text.startsWith("/move")) {
+      const args = text.replace("/move", "").trim().split(/\s+/);
+      if (args.length === 2) {
+        const ok = await moveStudent(
+          chatId,
+          replyMessageId,
+          args[0],
+          Number(args[1]),
+          actorId,
+          actorName,
+        );
+        if (!ok) {
+          await sendTempMessage(chatId, "Move не виконано");
+        }
+      } else {
+        await sendTempMessage(chatId, "Формат: /move Прізвище Позиція");
+      }
+      return res.status(200).send("ok");
+    }
+
+    if (text.startsWith("/undo")) {
+      const ok = await undoLast(chatId, replyMessageId, actorId, actorName);
+      if (!ok) {
+        await sendTempMessage(chatId, "Немає що скасувати");
       }
       return res.status(200).send("ok");
     }
 
     return res.status(200).send("ok");
-  } catch (e) {
-    console.error("Handler error:", e);
+  } catch (error) {
+    console.error("BOT ERROR:", error);
     return res.status(200).send("ok");
   }
 }
