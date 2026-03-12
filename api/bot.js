@@ -56,6 +56,13 @@ function shuffle(arr) {
   return result;
 }
 
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 function parseGenerateCommand(text) {
   let students = null;
   let subject = "";
@@ -98,13 +105,6 @@ function renderQueueText(queue, items, history = []) {
   }
 
   return text;
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
 }
 
 async function tg(method, payload) {
@@ -166,22 +166,6 @@ async function getQueueHistory(queueId) {
 
   if (error) throw error;
   return data || [];
-}
-
-async function saveSnapshot(queueId) {
-  const items = await getQueueItems(queueId);
-  const snapshot = items.map(({ surname, position, status }) => ({
-    surname,
-    position,
-    status,
-  }));
-
-  const { error } = await supabase.from("queue_snapshots").insert({
-    queue_id: queueId,
-    items_json: snapshot,
-  });
-
-  if (error) throw error;
 }
 
 async function appendHistory(
@@ -362,7 +346,6 @@ async function restoreQueueFromReply(
     `restore (${actorName})`,
     {},
   );
-
   await rebuildMessage(chatId, replyMessageId);
   return true;
 }
@@ -377,8 +360,6 @@ async function setStatus(
 ) {
   const queue = await getQueueByMessage(chatId, messageId);
   if (!queue) return false;
-
-  await saveSnapshot(queue.id);
 
   const items = await getQueueItems(queue.id);
   const target = items.find((x) => x.surname === surname);
@@ -421,8 +402,6 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
   if (first.status !== "+" || second.status !== "+") {
     return { ok: false, reason: "Swap дозволений тільки якщо в обох стоїть +" };
   }
-
-  await saveSnapshot(queue.id);
 
   const { error: e1 } = await supabase
     .from("queue_items")
@@ -470,8 +449,6 @@ async function moveStudent(
   const target = items.find((x) => x.surname === surname);
   if (!target) return false;
 
-  await saveSnapshot(queue.id);
-
   const oldPos = target.position;
   const maxPos = items.length;
   const finalPos = Math.max(1, Math.min(Number(newPos), maxPos));
@@ -503,60 +480,6 @@ async function moveStudent(
     { surname, oldPos, newPos: finalPos },
   );
 
-  await rebuildMessage(chatId, messageId);
-  return true;
-}
-
-async function undoLast(chatId, messageId, actorId, actorName) {
-  const queue = await getQueueByMessage(chatId, messageId);
-  if (!queue) return false;
-
-  const { data: snapshot, error } = await supabase
-    .from("queue_snapshots")
-    .select("*")
-    .eq("queue_id", queue.id)
-    .order("id", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) throw error;
-  if (!snapshot) return false;
-
-  const { error: deleteItemsError } = await supabase
-    .from("queue_items")
-    .delete()
-    .eq("queue_id", queue.id);
-
-  if (deleteItemsError) throw deleteItemsError;
-
-  const restoredItems = snapshot.items_json.map((x) => ({
-    queue_id: queue.id,
-    surname: x.surname,
-    position: x.position,
-    status: x.status || "",
-  }));
-
-  const { error: insertError } = await supabase
-    .from("queue_items")
-    .insert(restoredItems);
-
-  if (insertError) throw insertError;
-
-  const { error: deleteSnapshotError } = await supabase
-    .from("queue_snapshots")
-    .delete()
-    .eq("id", snapshot.id);
-
-  if (deleteSnapshotError) throw deleteSnapshotError;
-
-  await appendHistory(
-    queue.id,
-    actorId,
-    actorName,
-    "undo",
-    `undo (${actorName})`,
-    {},
-  );
   await rebuildMessage(chatId, messageId);
   return true;
 }
@@ -765,14 +688,6 @@ export default async function handler(req, res) {
         }
       } else {
         await sendTempMessage(chatId, "Формат: /move Прізвище Позиція");
-      }
-      return res.status(200).send("ok");
-    }
-
-    if (text.startsWith("/undo")) {
-      const ok = await undoLast(chatId, replyMessageId, actorId, actorName);
-      if (!ok) {
-        await sendTempMessage(chatId, "Немає що скасувати");
       }
       return res.status(200).send("ok");
     }
