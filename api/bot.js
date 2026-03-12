@@ -685,19 +685,46 @@ export default async function handler(req, res) {
       return res.status(200).send("ok");
     }
 
-    const pm = text.match(/^(\S+)\s*([+-])$/);
-    if (pm) {
+    let surnameForStatus = null;
+    let statusAction = null;
+
+    const pmFull = text.match(/^(\S+)\s*([+-])$/);
+    if (pmFull) {
+      surnameForStatus = pmFull[1];
+      statusAction = pmFull[2];
+    } else if (text === "+" || text === "-") {
+      statusAction = text;
+
+      const { data: binding, error: bindingError } = await supabase
+        .from("user_bindings")
+        .select("surname")
+        .eq("tg_user_id", actorId)
+        .maybeSingle();
+
+      if (bindingError) throw bindingError;
+
+      if (!binding?.surname) {
+        await sendTempMessage(chatId, "Спочатку виконай /me Прізвище");
+        return res.status(200).send("ok");
+      }
+
+      surnameForStatus = binding.surname;
+    }
+
+    if (surnameForStatus && statusAction) {
       const ok = await setStatus(
         chatId,
         replyMessageId,
-        pm[1],
-        pm[2],
+        surnameForStatus,
+        statusAction,
         actorId,
         actorName,
       );
+
       if (!ok) {
         await sendTempMessage(chatId, "Не вдалося змінити статус");
       }
+
       return res.status(200).send("ok");
     }
 
