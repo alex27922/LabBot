@@ -465,6 +465,16 @@ async function moveStudent(
     const item = reordered[i];
     const { error } = await supabase
       .from("queue_items")
+      .update({ position: 1000 + i })
+      .eq("id", item.id);
+
+    if (error) throw error;
+  }
+
+  for (let i = 0; i < reordered.length; i += 1) {
+    const item = reordered[i];
+    const { error } = await supabase
+      .from("queue_items")
       .update({ position: i + 1 })
       .eq("id", item.id);
 
