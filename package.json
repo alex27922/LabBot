@@ -1,6 +1,8 @@
 {
+  "name": "lab-bot",
+  "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    "@supabase/supabase-js": "^2.99.1"
   }
 }
