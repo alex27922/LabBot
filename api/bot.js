@@ -483,6 +483,9 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
     return { ok: false, reason: "Swap дозволений тільки якщо в обох стоїть +" };
   }
 
+  const firstOldPos = first.position;
+  const secondOldPos = second.position;
+
   const { error: e1 } = await supabase
     .from("queue_items")
     .update({ position: -101 })
@@ -497,13 +500,13 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
 
   const { error: e3 } = await supabase
     .from("queue_items")
-    .update({ position: second.position })
+    .update({ position: secondOldPos })
     .eq("id", first.id);
   if (e3) throw e3;
 
   const { error: e4 } = await supabase
     .from("queue_items")
-    .update({ position: first.position })
+    .update({ position: firstOldPos })
     .eq("id", second.id);
   if (e4) throw e4;
 
@@ -512,11 +515,17 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
     actorId,
     actorName,
     "swap",
-    `swap ${a}(${first.position}) ↔ ${b}(${second.position}) (${actorName})`,
+    `swap ${a}(${firstOldPos}) ↔ ${b}(${secondOldPos}) (${actorName})`,
     { a, b },
   );
 
   await rebuildMessage(chatId, messageId);
+
+  await sendTempMessage(
+    chatId,
+    `🔁 ${actorName} поміняв місцями ${a} (${firstOldPos}) ↔ ${b} (${secondOldPos})`,
+  );
+
   return { ok: true };
 }
 
@@ -543,6 +552,9 @@ async function swapStudentsByIds(
     return { ok: false, reason: "Swap дозволений тільки якщо в обох стоїть +" };
   }
 
+  const firstOldPos = first.position;
+  const secondOldPos = second.position;
+
   const { error: e1 } = await supabase
     .from("queue_items")
     .update({ position: -101 })
@@ -557,13 +569,13 @@ async function swapStudentsByIds(
 
   const { error: e3 } = await supabase
     .from("queue_items")
-    .update({ position: second.position })
+    .update({ position: secondOldPos })
     .eq("id", first.id);
   if (e3) throw e3;
 
   const { error: e4 } = await supabase
     .from("queue_items")
-    .update({ position: first.position })
+    .update({ position: firstOldPos })
     .eq("id", second.id);
   if (e4) throw e4;
 
@@ -572,11 +584,17 @@ async function swapStudentsByIds(
     actorId,
     actorName,
     "swap",
-    `swap ${first.surname}(${first.position}) ↔ ${second.surname}(${second.position}) (${actorName})`,
+    `swap ${first.surname}(${firstOldPos}) ↔ ${second.surname}(${secondOldPos}) (${actorName})`,
     { a: first.surname, b: second.surname },
   );
 
   await rebuildMessage(chatId, messageId);
+
+  await sendTempMessage(
+    chatId,
+    `🔁 ${actorName} поміняв місцями ${first.surname} (${firstOldPos}) ↔ ${second.surname} (${secondOldPos})`,
+  );
+
   return { ok: true };
 }
 
