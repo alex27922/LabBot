@@ -63,6 +63,38 @@ function escapeHtml(str) {
     .replaceAll(">", "&gt;");
 }
 
+function chunk(arr, size = 2) {
+  const rows = [];
+  for (let i = 0; i < arr.length; i += size) {
+    rows.push(arr.slice(i, i + size));
+  }
+  return rows;
+}
+
+function buildMainKeyboard(messageId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "➕ Мій +", callback_data: `plus|${messageId}` },
+        { text: "➖ Мій -", callback_data: `minus|${messageId}` },
+        { text: "🔁 Swap", callback_data: `swapstart|${messageId}` },
+      ],
+    ],
+  };
+}
+
+function buildSwapKeyboard(messageId, actorItemId, candidates) {
+  const buttons = candidates.map((item) => ({
+    text: `${item.surname}${item.status ? " " + item.status : ""}`,
+    callback_data: `swapto|${messageId}|${actorItemId}|${item.id}`,
+  }));
+
+  const rows = chunk(buttons, 2);
+  rows.push([{ text: "⬅️ Назад", callback_data: `swapcancel|${messageId}` }]);
+
+  return { inline_keyboard: rows };
+}
+
 function parseGenerateCommand(text) {
   let students = null;
   let subject = "";
@@ -120,6 +152,13 @@ async function tg(method, payload) {
   const data = await resp.json();
 
   if (!data.ok) {
+    if (
+      data.description &&
+      data.description.includes("message is not modified")
+    ) {
+      return null;
+    }
+
     console.error("TELEGRAM_ERROR", { method, payload, response: data });
     throw new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
   }
@@ -132,6 +171,37 @@ async function sendTempMessage(chatId, text) {
     chat_id: chatId,
     text,
   });
+}
+
+async function answerCallbackQuery(
+  callbackQueryId,
+  text = "",
+  showAlert = false,
+) {
+  await tg("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: showAlert,
+  });
+}
+
+async function editMessageKeyboard(chatId, messageId, replyMarkup) {
+  await tg("editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: replyMarkup,
+  });
+}
+
+async function getBoundSurname(tgUserId) {
+  const { data, error } = await supabase
+    .from("user_bindings")
+    .select("surname")
+    .eq("tg_user_id", tgUserId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data?.surname || null;
 }
 
 async function getQueueByMessage(chatId, messageId) {
@@ -201,6 +271,7 @@ async function rebuildMessage(chatId, messageId) {
     message_id: messageId,
     text,
     parse_mode: "HTML",
+    reply_markup: buildMainKeyboard(messageId),
   });
 }
 
@@ -229,6 +300,7 @@ async function createQueue(chatId, title, scope, subject, surnames) {
   const { error: itemsError } = await supabase
     .from("queue_items")
     .insert(items);
+
   if (itemsError) throw itemsError;
 
   const text = renderQueueText(queueRow, items, []);
@@ -236,6 +308,7 @@ async function createQueue(chatId, title, scope, subject, surnames) {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
+    reply_markup: buildMainKeyboard(0),
   });
 
   const { error: updateError } = await supabase
@@ -247,6 +320,12 @@ async function createQueue(chatId, title, scope, subject, surnames) {
     .eq("id", queueRow.id);
 
   if (updateError) throw updateError;
+
+  await tg("editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: sent.message_id,
+    reply_markup: buildMainKeyboard(sent.message_id),
+  });
 
   await appendHistory(queueRow.id, null, "system", "generate", "generate", {
     scope,
@@ -346,6 +425,7 @@ async function restoreQueueFromReply(
     `restore (${actorName})`,
     {},
   );
+
   await rebuildMessage(chatId, replyMessageId);
   return true;
 }
@@ -405,13 +485,13 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
 
   const { error: e1 } = await supabase
     .from("queue_items")
-    .update({ position: -1 })
+    .update({ position: -101 })
     .eq("id", first.id);
   if (e1) throw e1;
 
   const { error: e2 } = await supabase
     .from("queue_items")
-    .update({ position: first.position })
+    .update({ position: -102 })
     .eq("id", second.id);
   if (e2) throw e2;
 
@@ -421,6 +501,12 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
     .eq("id", first.id);
   if (e3) throw e3;
 
+  const { error: e4 } = await supabase
+    .from("queue_items")
+    .update({ position: first.position })
+    .eq("id", second.id);
+  if (e4) throw e4;
+
   await appendHistory(
     queue.id,
     actorId,
@@ -428,6 +514,66 @@ async function swapStudents(chatId, messageId, a, b, actorId, actorName) {
     "swap",
     `swap ${a}(${first.position}) ↔ ${b}(${second.position}) (${actorName})`,
     { a, b },
+  );
+
+  await rebuildMessage(chatId, messageId);
+  return { ok: true };
+}
+
+async function swapStudentsByIds(
+  chatId,
+  messageId,
+  firstItemId,
+  secondItemId,
+  actorId,
+  actorName,
+) {
+  const queue = await getQueueByMessage(chatId, messageId);
+  if (!queue) return { ok: false, reason: "Чергу не знайдено" };
+
+  const items = await getQueueItems(queue.id);
+  const first = items.find((x) => x.id === Number(firstItemId));
+  const second = items.find((x) => x.id === Number(secondItemId));
+
+  if (!first || !second) {
+    return { ok: false, reason: "Не знайдено одне або два прізвища" };
+  }
+
+  if (first.status !== "+" || second.status !== "+") {
+    return { ok: false, reason: "Swap дозволений тільки якщо в обох стоїть +" };
+  }
+
+  const { error: e1 } = await supabase
+    .from("queue_items")
+    .update({ position: -101 })
+    .eq("id", first.id);
+  if (e1) throw e1;
+
+  const { error: e2 } = await supabase
+    .from("queue_items")
+    .update({ position: -102 })
+    .eq("id", second.id);
+  if (e2) throw e2;
+
+  const { error: e3 } = await supabase
+    .from("queue_items")
+    .update({ position: second.position })
+    .eq("id", first.id);
+  if (e3) throw e3;
+
+  const { error: e4 } = await supabase
+    .from("queue_items")
+    .update({ position: first.position })
+    .eq("id", second.id);
+  if (e4) throw e4;
+
+  await appendHistory(
+    queue.id,
+    actorId,
+    actorName,
+    "swap",
+    `swap ${first.surname}(${first.position}) ↔ ${second.surname}(${second.position}) (${actorName})`,
+    { a: first.surname, b: second.surname },
   );
 
   await rebuildMessage(chatId, messageId);
@@ -498,6 +644,7 @@ async function markUpdateProcessed(updateId) {
   const { error } = await supabase
     .from("processed_updates")
     .insert({ update_id: updateId });
+
   if (error) throw error;
 }
 
@@ -527,6 +674,161 @@ export default async function handler(req, res) {
         return res.status(200).send("ok");
       }
       await markUpdateProcessed(updateId);
+    }
+
+    const cb = body?.callback_query;
+    if (cb) {
+      const callbackId = cb.id;
+      const chatId = cb.message?.chat?.id;
+      const messageId = cb.message?.message_id;
+      const actorId = cb.from?.id ?? null;
+      const actorName = cb.from?.first_name || "user";
+      const data = cb.data || "";
+
+      if (!chatId || !messageId || !data) {
+        await answerCallbackQuery(callbackId);
+        return res.status(200).send("ok");
+      }
+
+      const parts = data.split("|");
+      const action = parts[0];
+      const targetMessageId = Number(parts[1]);
+
+      if (targetMessageId !== Number(messageId)) {
+        await answerCallbackQuery(callbackId, "Кнопка застаріла", true);
+        return res.status(200).send("ok");
+      }
+
+      if (action === "plus" || action === "minus") {
+        const boundSurname = await getBoundSurname(actorId);
+
+        if (!boundSurname) {
+          await answerCallbackQuery(
+            callbackId,
+            "Спочатку виконай /me Прізвище",
+            true,
+          );
+          return res.status(200).send("ok");
+        }
+
+        const ok = await setStatus(
+          chatId,
+          messageId,
+          boundSurname,
+          action === "plus" ? "+" : "-",
+          actorId,
+          actorName,
+        );
+
+        if (!ok) {
+          await answerCallbackQuery(
+            callbackId,
+            "Не вдалося змінити статус",
+            true,
+          );
+        } else {
+          await answerCallbackQuery(callbackId, "Готово");
+        }
+
+        return res.status(200).send("ok");
+      }
+
+      if (action === "swapstart") {
+        const queue = await getQueueByMessage(chatId, messageId);
+        if (!queue) {
+          await answerCallbackQuery(callbackId, "Чергу не знайдено", true);
+          return res.status(200).send("ok");
+        }
+
+        const boundSurname = await getBoundSurname(actorId);
+        if (!boundSurname) {
+          await answerCallbackQuery(
+            callbackId,
+            "Спочатку виконай /me Прізвище",
+            true,
+          );
+          return res.status(200).send("ok");
+        }
+
+        const items = await getQueueItems(queue.id);
+        const actorItem = items.find((x) => x.surname === boundSurname);
+
+        if (!actorItem) {
+          await answerCallbackQuery(
+            callbackId,
+            "Твого прізвища немає в цій черзі",
+            true,
+          );
+          return res.status(200).send("ok");
+        }
+
+        if (actorItem.status !== "+") {
+          await answerCallbackQuery(
+            callbackId,
+            "Для swap у тебе має стояти +",
+            true,
+          );
+          return res.status(200).send("ok");
+        }
+
+        const candidates = items.filter(
+          (x) => x.id !== actorItem.id && x.status === "+",
+        );
+
+        if (candidates.length === 0) {
+          await answerCallbackQuery(
+            callbackId,
+            "Немає ні з ким мінятися",
+            true,
+          );
+          return res.status(200).send("ok");
+        }
+
+        await editMessageKeyboard(
+          chatId,
+          messageId,
+          buildSwapKeyboard(messageId, actorItem.id, candidates),
+        );
+
+        await answerCallbackQuery(callbackId, "Обери, з ким мінятися");
+        return res.status(200).send("ok");
+      }
+
+      if (action === "swapto") {
+        const actorItemId = Number(parts[2]);
+        const targetItemId = Number(parts[3]);
+
+        const result = await swapStudentsByIds(
+          chatId,
+          messageId,
+          actorItemId,
+          targetItemId,
+          actorId,
+          actorName,
+        );
+
+        if (!result.ok) {
+          await answerCallbackQuery(callbackId, result.reason, true);
+          await rebuildMessage(chatId, messageId);
+        } else {
+          await answerCallbackQuery(callbackId, "Swap виконано");
+        }
+
+        return res.status(200).send("ok");
+      }
+
+      if (action === "swapcancel") {
+        await editMessageKeyboard(
+          chatId,
+          messageId,
+          buildMainKeyboard(messageId),
+        );
+        await answerCallbackQuery(callbackId, "Скасовано");
+        return res.status(200).send("ok");
+      }
+
+      await answerCallbackQuery(callbackId);
+      return res.status(200).send("ok");
     }
 
     const msg = body?.message;
